@@ -30,28 +30,32 @@ cd deep_4_all
 
 ### 3. Installer les dépendances
 
+pour mac ou si vous avez que un processeur Intel pas de GPU 
+
 ```bash
 uv sync
 ```
+
+Si vous avre un GPU nvidia
 
 Cette commande crée automatiquement un environnement virtuel et installe toutes les dépendances.
 
 Pour installer pytorch GPU
 
 ````bash
-uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
-````
-
-ou défaut CPU pour mac ou si vous avez que un processeur Intel pas de GPU
-
-````bash
-uv pip install torch torchvision
+uv sync --extra cu130
 ````
 
 ## Utilisation pour les Cours
 
 ```bash
 uv run marimo edit
+```
+
+Activer l'environnement et lancer Jupyter Lab :
+
+```bash
+uv run jupyter lab
 ```
 
 ## Structure du dossier `cours/`
