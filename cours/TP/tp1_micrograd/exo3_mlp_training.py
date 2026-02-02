@@ -37,29 +37,11 @@ from micrograd.nn import MLP
 
 
 def hinge_loss(y, y_preds):
-    return [(1 + -yi * y_predi).relu() for yi, y_predi in zip(y, y_preds)]
-
-
-def bce_loss(y, y_preds):
-    """
-    Binary Cross-Entropy Loss avec sigmoid.
-
-    TODO: Implementer cette fonction
-
-    Formule : Loss = -t * log(p) - (1-t) * log(1-p)
-    Ou :
-        - t : label cible (0 ou 1, converti depuis -1/+1)
-        - p : sigmoid(y_pred) = probabilite predite
-
-    Etapes pour chaque paire (yi, y_predi):
-        1. Convertir le label de -1/+1 vers 0/1 : t = (yi + 1) / 2
-        2. Appliquer sigmoid sur la prediction : p = y_predi.sigmoid()
-        3. Calculer la BCE : loss = -(t * p.log() + (1-t) * (1-p).log())
-           Attention: (1-t) et (1-p) doivent etre des Value!
-
-    Retourne une liste de Value contenant la loss pour chaque exemple.
-    """
-    raise NotImplementedError("TODO: Implementer bce_loss()")
+    losses = []
+    for y_i, y_pred in zip(y, y_preds):
+        loss = Value(1.0) - y_i * y_pred
+        losses.append(loss.relu())
+    return losses
 
 
 # =============================================================================
