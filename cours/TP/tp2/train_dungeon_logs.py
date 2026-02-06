@@ -301,7 +301,7 @@ def main(args):
     scheduler = None
     if args.use_scheduler:
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode='max', factor=0.5, patience=5, verbose=True
+                optimizer, mode='max', factor=0.5, patience=5
                 )
 
     print(f"Optimiseur: {args.optimizer.upper()}, LR: {args.learning_rate}")
@@ -428,11 +428,11 @@ if __name__ == "__main__":
             )
     # Modèle
     parser.add_argument(
-            '--embed_dim', type=int, default=1,
+            '--embed_dim', type=int, default=258,
             help='Dimension des embeddings'
             )
     parser.add_argument(
-            '--hidden_dim', type=int, default=1,
+            '--hidden_dim', type=int, default=258,
             help='Dimension de l\'état caché RNN/LSTM'
             )
     parser.add_argument(
@@ -446,7 +446,7 @@ if __name__ == "__main__":
     parser.add_argument(
             '--mode',
             type=str,
-            default='rnn',
+            default='linear',
             choices=['linear', 'rnn', 'lstm'],
             help='Architecture du modèle (default: %(default)s)')
     parser.add_argument(
