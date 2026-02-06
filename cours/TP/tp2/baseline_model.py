@@ -34,7 +34,13 @@ class GuildOracle(nn.Module):
         """
         super().__init__()
         # TODO
-        self.network = nn.Sequential()
+        # Architecture minimaliste pour la généralisation
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, 1)
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

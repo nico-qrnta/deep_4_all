@@ -177,10 +177,13 @@ def main(args):
                 model.parameters(),
                 lr=args.learning_rate,
                 momentum=0.9,
-                weight_decay=args.weight_decay
+                weight_decay=args.weight_decay if args.weight_decay > 0 else 0.01
                 )
 
     print(f"Optimiseur: {args.optimizer.upper()}, LR: {args.learning_rate}")
+
+    # Scheduler
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
 
     # Historique
     history = {
@@ -204,6 +207,9 @@ def main(args):
 
         # Validation
         val_loss, val_acc = evaluate(model, val_loader, criterion, device)
+
+        # Update scheduler
+        scheduler.step(val_acc)
 
         # Historique
         history['train_loss'].append(train_loss)
@@ -287,23 +293,23 @@ if __name__ == "__main__":
 
     # Données
     parser.add_argument(
-            '--normalize', action='store_true', default=False,
+            '--normalize', action='store_true', default=True,
             help='Normaliser les features'
             )
     parser.add_argument(
-            '--shuffle', action='store_true', default=False,
+            '--shuffle', action='store_true', default=True,
             help='Mélanger les données'
             )
 
     # Modèle
     parser.add_argument(
-            '--hidden_dim', type=int, default=256,
+            '--hidden_dim', type=int, default=4,
             help='Dimension des couches cachées'
             )
 
     # Entraînement
     parser.add_argument(
-            '--epochs', type=int, default=5,
+            '--epochs', type=int, default=100,
             help='Nombre d\'epochs'
             )
     parser.add_argument(
@@ -326,7 +332,7 @@ if __name__ == "__main__":
 
     # Early stopping
     parser.add_argument(
-            '--early_stopping', action='store_true', default=False,
+            '--early_stopping', action='store_true', default=True,
             help='Activer early stopping'
             )
     parser.add_argument(

@@ -428,11 +428,11 @@ if __name__ == "__main__":
             )
     # Modèle
     parser.add_argument(
-            '--embed_dim', type=int, default=258,
+            '--embed_dim', type=int, default=1,
             help='Dimension des embeddings'
             )
     parser.add_argument(
-            '--hidden_dim', type=int, default=258,
+            '--hidden_dim', type=int, default=1,
             help='Dimension de l\'état caché RNN/LSTM'
             )
     parser.add_argument(
@@ -446,7 +446,7 @@ if __name__ == "__main__":
     parser.add_argument(
             '--mode',
             type=str,
-            default='linear',
+            default='rnn',
             choices=['linear', 'rnn', 'lstm'],
             help='Architecture du modèle (default: %(default)s)')
     parser.add_argument(
