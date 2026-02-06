@@ -33,12 +33,10 @@ class GuildOracle(nn.Module):
             num_layers: Nombre de couches cachées
         """
         super().__init__()
-        # TODO
-        # Architecture minimaliste pour la généralisation
         self.network = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.3),
             nn.Linear(hidden_dim, 1)
         )
 

@@ -33,13 +33,17 @@ from baseline_model import GuildOracle, count_parameters
 class AdventurerDataset(Dataset):
     """Dataset des aventuriers de la Guilde."""
 
-    def __init__(self, csv_path: str, normalize: bool = False):
+    def __init__(self, csv_paths, normalize: bool = False):
         """
         Args:
-            csv_path: Chemin vers le fichier CSV
+            csv_paths: Chemin ou liste de chemins vers les fichiers CSV
             normalize: Si True, normalise les features (recommandé mais désactivé par défaut)
         """
-        self.df = pd.read_csv(csv_path)
+        if isinstance(csv_paths, (str, Path)):
+            csv_paths = [csv_paths]
+            
+        dfs = [pd.read_csv(p) for p in csv_paths]
+        self.df = pd.concat(dfs, ignore_index=True)
 
         # Séparer features et labels
         self.labels = torch.tensor(self.df['survie'].values, dtype=torch.float32)
@@ -128,14 +132,23 @@ def main(args):
     checkpoint_dir = Path(__file__).parent / "checkpoints"
     checkpoint_dir.mkdir(exist_ok=True)
 
+    # Liste des fichiers d'entraînement
+    train_files = [data_dir / "train.csv"]
+    cursed_file = data_dir / "train_cursed.csv"
+    if cursed_file.exists():
+            train_files.append(cursed_file)
+            print(f"Incluant les données maudites: {cursed_file}")
+    else:
+            print(f"⚠️ Fichier maudit non trouvé: {cursed_file}")
+
     # Charger les données
     print("\nChargement des données...")
     train_dataset = AdventurerDataset(
-            str(data_dir / "train.csv"),
+            train_files,
             normalize=args.normalize
             )
     val_dataset = AdventurerDataset(
-            str(data_dir / "val.csv"),
+            data_dir / "val.csv",
             normalize=args.normalize
             )
 
@@ -200,6 +213,11 @@ def main(args):
     patience_counter = 0
 
     for epoch in range(args.epochs):
+        if epoch == args.switch_epoch:
+            print("\n🔄 Switching from ADAM to SGD for fine-tuning...")
+            optimizer = optim.SGD(model.parameters(), lr=args.learning_rate / 10, momentum=0.9)
+            if scheduler is not None:
+                scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
         # Train
         train_loss, train_acc = train_epoch(
                 model, train_loader, criterion, optimizer, device
@@ -300,6 +318,10 @@ if __name__ == "__main__":
             '--shuffle', action='store_true', default=True,
             help='Mélanger les données'
             )
+    parser.add_argument(
+            '--use_cursed', action='store_true',
+            help='Utiliser aussi les données synthétiques des Terres Maudites'
+            )
 
     # Modèle
     parser.add_argument(
@@ -338,6 +360,10 @@ if __name__ == "__main__":
     parser.add_argument(
             '--patience', type=int, default=10,
             help='Patience pour early stopping'
+            )
+    parser.add_argument(
+            '--switch_epoch', type=int, default=-1,
+            help='Epoch à laquelle basculer de ADAM à SGD (-1 pour désactiver)'
             )
 
     # Autres

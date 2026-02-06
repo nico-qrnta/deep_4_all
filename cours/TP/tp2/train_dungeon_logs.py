@@ -321,6 +321,10 @@ def main(args):
     patience_counter = 0
 
     for epoch in range(args.epochs):
+        if epoch == args.switch_epoch:
+            print("🔄 Switching from ADAM to SGD for fine-tuning...")
+            optimizer = optim.SGD(model.parameters(), lr=args.learning_rate / 10, momentum=0.9)
+
         # Train
         train_loss, train_acc = train_epoch(
                 model, train_loader, criterion, optimizer, device
@@ -479,6 +483,10 @@ if __name__ == "__main__":
     parser.add_argument(
             '--use_scheduler', action='store_true', default=False,
             help='Utiliser un learning rate scheduler'
+            )
+    parser.add_argument(
+            '--switch_epoch', type=int, default=-1,
+            help='Epoch à laquelle basculer de ADAM à SGD (-1 pour désactiver)'
             )
 
     # Early stopping
