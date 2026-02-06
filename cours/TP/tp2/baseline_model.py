@@ -122,22 +122,28 @@ class DungeonOracle(nn.Module):
                 padding_idx=padding_idx
                 )
 
-        # Approche Baseline Linéaire (Alternative au RNN)
-        # On aplatit tout : (Batch, Seq_Len * Embed_Dim)
-        self.solo_embeddings = nn.Sequential(
-                nn.Flatten(),
-                nn.Linear(max_length * embed_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(hidden_dim, 1)  # Sortie directe pour comparaison
-                )
-        if self.mode != "linear":
+        if self.mode == "linear":
+            # Approche Baseline Linéaire (Alternative au RNN)
+            # On aplatit tout : (Batch, Seq_Len * Embed_Dim)
+            self.solo_embeddings = nn.Sequential(
+                    nn.Flatten(),
+                    nn.Linear(max_length * embed_dim, hidden_dim),
+                    nn.ReLU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.ReLU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(hidden_dim, 1)  # Sortie directe pour comparaison
+                    )
+        else:
             # Couche récurrente
             # PROBLEME: Par défaut c'est un RNN simple qui souffre du vanishing gradient
-            rnn_class = nn.LSTM if self.mode == "lstm" else nn.RNN
+            if self.mode == "lstm":
+                rnn_class = nn.LSTM
+            elif self.mode == "gru":
+                rnn_class = nn.GRU
+            else:
+                rnn_class = nn.RNN
 
             self.rnn = rnn_class(
                     input_size=embed_dim,
