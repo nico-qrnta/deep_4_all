@@ -173,6 +173,8 @@ Implémentez une fonction qui :
 
 ## Phase 4 : Implémentation du Divergence-Aware Sampling (DAS)
 
+[Code simple de demo](simple_dasd.py)
+
 ### Concept Révisé
 
 Le DAS ne juge pas une réponse dans sa globalité, mais analyse la **divergence phrase par phrase**. L'objectif est d'identifier et de conserver les réponses riches en "Teacher Sentences" : des étapes de raisonnement où le professeur est confiant mais où l'étudiant échoue ou hésite.
