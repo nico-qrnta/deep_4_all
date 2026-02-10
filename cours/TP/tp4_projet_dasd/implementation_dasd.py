@@ -1,180 +1,164 @@
+import json
+import os
 import numpy as np
 import torch
-from openai import OpenAI
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from tqdm import tqdm
 
-
-class DASPipelineQwen:
-    def __init__(self, openai_api_key, student_model_id="unsloth/Qwen3-4B-Instruct-2507-unsloth-bnb-4bit"):
+class DASFilteringPipeline:
+    def __init__(self, student_model_id="unsloth/Qwen3-4B-Instruct-2507-unsloth-bnb-4bit"):
         """
-        Initialise le pipeline DAS avec un Teacher (API) et un Student (Local 4-bit).
+        Initialise le pipeline de filtrage DAS avec le Student (Local 4-bit).
         """
-        # 1. Configuration Student (4-bit quantization)
-        bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.float16, )
-
         self.student_model_id = student_model_id
         print(f"Chargement du modèle étudiant : {self.student_model_id}...")
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.student_model_id, trust_remote_code=True)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        # On force tout le modèle sur le premier GPU (device 0) pour éviter le split CPU
         self.model = AutoModelForCausalLM.from_pretrained(
-                self.student_model_id, quantization_config=bnb_config, device_map="auto", trust_remote_code=True
-                )
+            self.student_model_id,
+            device_map={"": 0}, 
+            trust_remote_code=True,
+            dtype=torch.float16,
+            low_cpu_mem_usage=True
+        )
         self.model.eval()
 
-        # 2. Configuration Teacher (OpenAI Compatible API - ex: Infomaniak)
-        # Note: Remplacez base_url par l'URL correcte si différent de l'exemple
-        self.client = OpenAI(
-                api_key=openai_api_key, base_url="https://api.infomaniak.com/2/ai/48/openai/v1"
-                )
-        self.teacher_model_name = "openai/gpt-oss-120b"
-
-    def get_teacher_data(self, user_prompt, temperature=0.7):
+    def get_student_stats(self, prompt: str, response: str) -> dict:
         """
-        Génère la réponse du Teacher avec les logprobs.
+        Calcule les log-probabilités de la réponse (Student).
         """
-        messages = [{"role": "user", "content": user_prompt}]
-        # Note: Assurez-vous que le modèle supporte logprobs=True
-        response = self.client.chat.completions.create(
-                model=self.teacher_model_name, messages=messages, temperature=temperature, logprobs=True, top_logprobs=1
-                )
-
-        content = response.choices[0].message.content
-        logprobs_data = response.choices[0].logprobs
-        tokens = []
-        logprobs = []
-        # On vérifie si logprobs est disponible (certaines API compatibles ne le renvoient pas)
-        if logprobs_data:
-            for token_info in logprobs_data.content:
-                tokens.append(token_info.token)
-                logprobs.append(token_info.logprob)
-        else:
-            raise ValueError("L'API Teacher n'a pas renvoyé de logprobs. Vérifiez la compatibilité.")
-
-        # Compute total log probability (sum of logprobs)
-        total_logprob = sum(logprobs) if logprobs else 0.0
-
-        # Compute geometric mean of probabilities
-        # P_geom = exp(mean(logprobs))
-        mean_logprob = np.exp(np.mean(logprobs)) if logprobs else 0.0
-        return {
-            "content":      content, "tokens": tokens, "logprobs": logprobs, "total_logprob": total_logprob,
-            "mean_logprob": mean_logprob, "num_tokens": len(tokens)
-            }
-
-    def get_student_logprobs(self, prompt: str, response: str) -> dict:
-        """
-        Calcule les log-probabilités de la réponse (Student) de manière robuste.
-        Utilise la méthode de masquage standard (Labels = -100 pour le prompt).
-        """
-        # 1. Préparer le texte complet (Prompt + Réponse)
-        # On utilise le chat template qui gère proprement les balises <|im_start|>, etc.
         messages = [
             {"role": "user", "content": prompt},
             {"role": "assistant", "content": response}
-            ]
+        ]
         full_text = self.tokenizer.apply_chat_template(messages, tokenize=False)
 
-        # 2. Tokenizer le tout
-        # return_tensors='pt' nous donne directement les tenseurs PyTorch
         inputs = self.tokenizer(full_text, return_tensors="pt").to(self.model.device)
         input_ids = inputs.input_ids
 
-        # 3. Identifier la longueur du Prompt pour le masquage
-        # On regénère le prompt SEUL avec l'amorce de réponse (add_generation_prompt=True)
-        # Cela inclut "<|im_start|>assistant\n" à la fin, pour s'aligner parfaitement.
+        # Masquage du prompt
         prompt_messages = [{"role": "user", "content": prompt}]
-        prompt_text = self.tokenizer.apply_chat_template(
-                prompt_messages, tokenize=False, add_generation_prompt=True
-                )
-
-        # On tokenise le prompt seul pour avoir sa longueur exacte en tokens
+        prompt_text = self.tokenizer.apply_chat_template(prompt_messages, tokenize=False, add_generation_prompt=True)
         prompt_tokens = self.tokenizer(prompt_text, return_tensors="pt", add_special_tokens=False).input_ids
         response_start_idx = prompt_tokens.shape[1]
 
-        # 4. Créer les Labels (Masking du Prompt)
-        # -100 est l'index ignoré par défaut par CrossEntropyLoss de PyTorch
         labels = input_ids.clone()
-        # On masque tout ce qui est avant le début de la réponse
         labels[:, :response_start_idx] = -100
 
-        # 5. Calcul "Clean" avec CrossEntropyLoss
         with torch.no_grad():
             outputs = self.model(input_ids)
             logits = outputs.logits
 
-            # Shift des logits et labels pour la prédiction "next token"
-            # logits[t] prédit labels[t+1]
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
 
-            # reduction='none' nous donne la perte pour chaque token individuel
             loss_fct = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
             token_losses = loss_fct(shift_logits.transpose(1, 2), shift_labels)
-
-            # La Loss est par définition -log(p), donc log_prob = -loss
             token_logprobs = -token_losses
 
-            # On ne garde que les tokens de la réponse (ceux qui n'étaient pas masqués à -100)
-            # Note: shift_labels a été décalé, donc on utilise son masque
             valid_mask = shift_labels != -100
             valid_logprobs = token_logprobs[valid_mask].cpu().numpy()
 
-        # Calcul des statistiques DAS
-        total_logprob = np.sum(valid_logprobs)
-        mean_logprob = np.exp(np.mean(valid_logprobs)) if len(valid_logprobs) > 0 else 0.0
-
+        # Moyenne géométrique des probabilités (comme dans DAS)
+        # exp(mean(logprob))
+        mean_prob = np.exp(np.mean(valid_logprobs)) if len(valid_logprobs) > 0 else 0.0
+        
         return {
-            "total_logprob": total_logprob,
-            "mean_logprob":  mean_logprob,
-            "num_tokens":    len(valid_logprobs),
-            "logprobs":      valid_logprobs.tolist()
-            }
+            "mean_prob": float(mean_prob),
+            "num_tokens": int(len(valid_logprobs))
+        }
 
-    def decide_keep_prompt(self, teacher_answer, student_answer):
-        teacher_logprob = teacher_answer.get("mean_logprob", 0.0)
-        student_logprob = student_answer.get("mean_logprob", 0.0)
-
-        print(teacher_logprob, student_logprob)
-
-        divergence = teacher_logprob - student_logprob
-
-        print(divergence)
-
-    def run(self, prompt):
-        print(f"Traitement du prompt : '{prompt}'")
-
-        # 1. Teacher
-        teacher_answer = self.get_teacher_data(prompt)
-        if not teacher_answer:
+    def process_dataset(self, input_path, output_dir, threshold=0.1, max_entries=None):
+        if not os.path.exists(input_path):
+            print(f"Erreur : Le fichier {input_path} n'existe pas.")
             return
 
-        print(f"Réponse Teacher reçue ({len(teacher_answer["content"])} chars).")
+        with open(input_path, 'r', encoding='utf-8') as f:
+            dataset = json.load(f)
 
-        # 2. Student & Calculs
-        try:
-            student_answer = self.get_student_logprobs(prompt, teacher_answer["content"])
+        stage1_data = []
+        stage2_data = []
 
-            # 3. Décision
-            return self.decide_keep_prompt(teacher_answer, student_answer)
+        if max_entries is not None:
+            dataset = dataset[:max_entries]
 
-        except Exception as e:
-            print(f"Erreur durant le calcul DAS : {e}")
-            import traceback
-            traceback.print_exc()
-            return None
+        for entry in tqdm(dataset):
+            instruction = entry.get("input", "")
+            system_prompt = entry.get("system_prompt", "")
 
+            # Traitement Stage 1 (Basse température)
+            if "stage1_response" in entry:
+                s1 = entry["stage1_response"]
+                p_teacher = s1.get("confidence", 0.0) / 100.0
+                resp_content = s1.get("content", "")
+                
+                try:
+                    stats = self.get_student_stats(instruction, resp_content)
+                    p_student = stats["mean_prob"]
+                    divergence = p_teacher - p_student
+                    
+                    # Logique DAS : On garde si la divergence est positive (Teacher >> Student)
+                    # ou si on veut simplement tout le stage 1 pour la base.
+                    # Ici on applique un filtrage léger pour le stage 1
+                    if divergence > -0.05: # On tolère que le student soit un peu meilleur
+                        stage1_data.append(self.format_sharegpt(instruction, resp_content, system_prompt))
+                except Exception as e:
+                    print(f"Erreur Stage 1 : {e}")
 
-# --- MAIN EXECUTION ---
+            # Traitement Stage 2 (Haute température)
+            if "stage2_response" in entry:
+                s2 = entry["stage2_response"]
+                p_teacher = s2.get("confidence", 0.0) / 100.0
+                resp_content = s2.get("content", "")
+
+                try:
+                    stats = self.get_student_stats(instruction, resp_content)
+                    p_student = stats["mean_prob"]
+                    divergence = p_teacher - p_student
+
+                    # DAS strict pour Stage 2 (Haute diversité)
+                    if divergence > threshold:
+                        stage2_data.append(self.format_sharegpt(instruction, resp_content, system_prompt))
+                except Exception as e:
+                    print(f"Erreur Stage 2 : {e}")
+
+        # Sauvegarde
+        os.makedirs(output_dir, exist_ok=True)
+        s1_path = os.path.join(output_dir, "train_stage1_filtered.json")
+        s2_path = os.path.join(output_dir, "train_stage2_filtered.json")
+
+        with open(s1_path, 'w', encoding='utf-8') as f:
+            json.dump(stage1_data, f, ensure_ascii=False, indent=2)
+        
+        with open(s2_path, 'w', encoding='utf-8') as f:
+            json.dump(stage2_data, f, ensure_ascii=False, indent=2)
+
+        print(f"Filtrage terminé.")
+        print(f"Stage 1: {len(stage1_data)} exemples retenus.")
+        print(f"Stage 2: {len(stage2_data)} exemples retenus.")
+
+    def format_sharegpt(self, instruction, response, system_prompt):
+        return {
+            "conversations": [
+                {"from": "human", "value": instruction},
+                {"from": "gpt", "value": response}
+            ],
+            "system": system_prompt
+        }
+
 if __name__ == "__main__":
-    # Clé API
-    API_KEY = "token here"
+    # Paramètres
+    DATASET_PATH = "synthetic_dataset.json"
+    OUTPUT_DIR = "."
+    STUDENT_MODEL = "unsloth/Qwen3-4B-Instruct-2507-unsloth-bnb-4bit"
+    
+    # Seuil de divergence (P_T - P_S)
+    # Plus il est élevé, plus on est sélectif sur les "Teacher Sentences"
+    THRESHOLD = 0.1 
 
-    # ID Modèle Étudiant (Compatible 4-bit unsloth/bnb)
-    STUDENT_ID = "unsloth/Qwen3-4B-Instruct-2507-unsloth-bnb-4bit"
-
-    pipeline = DASPipelineQwen(openai_api_key=API_KEY, student_model_id=STUDENT_ID)
-
-    # Test
-    test_prompt = "Explique le principe de la supraconductivité de manière simple."
-    result = pipeline.run(test_prompt)
+    pipeline = DASFilteringPipeline(student_model_id=STUDENT_MODEL)
+    pipeline.process_dataset(DATASET_PATH, OUTPUT_DIR, threshold=THRESHOLD)
