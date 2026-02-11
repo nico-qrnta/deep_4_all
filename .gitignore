@@ -4,3 +4,5 @@ cours/TP/tp1_micrograd/__pycache__
 cours/TP/tp4_projet_dasd/synthetic_dataset.json
 cours/TP/tp4_projet_dasd/train_stage1.json
 cours/TP/tp4_projet_dasd/train_stage2.json
+cours/TP/tp4_projet_dasd/train_stage1_filtered.json
+cours/TP/tp4_projet_dasd/train_stage2_filtered.json

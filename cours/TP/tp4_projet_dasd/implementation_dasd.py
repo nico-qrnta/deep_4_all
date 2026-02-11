@@ -1,10 +1,24 @@
 import json
 import os
+import re
 import numpy as np
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
+# -----------------------
+# Config 4-bit
+# -----------------------
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16
+)
+
+# -----------------------
+# Pipeline DAS Filtering
+# -----------------------
 class DASFilteringPipeline:
     def __init__(self, student_model_id="unsloth/Qwen3-4B-Instruct-2507-unsloth-bnb-4bit"):
         """
@@ -17,15 +31,22 @@ class DASFilteringPipeline:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # On force tout le modèle sur le premier GPU (device 0) pour éviter le split CPU
         self.model = AutoModelForCausalLM.from_pretrained(
             self.student_model_id,
-            device_map={"": 0}, 
-            trust_remote_code=True,
-            dtype=torch.float16,
-            low_cpu_mem_usage=True
+            quantization_config=bnb_config,
+            device_map="auto",
+            trust_remote_code=True
         )
+
         self.model.eval()
+
+    # -----------------------
+    # Utilities
+    # -----------------------
+    @staticmethod
+    def split_into_sentences(text: str):
+        sentences = re.split(r'(?<=[.!?])\s+|\n+', text)
+        return [s.strip() for s in sentences if s.strip()]
 
     def get_student_stats(self, prompt: str, response: str) -> dict:
         """
@@ -42,7 +63,9 @@ class DASFilteringPipeline:
 
         # Masquage du prompt
         prompt_messages = [{"role": "user", "content": prompt}]
-        prompt_text = self.tokenizer.apply_chat_template(prompt_messages, tokenize=False, add_generation_prompt=True)
+        prompt_text = self.tokenizer.apply_chat_template(
+            prompt_messages, tokenize=False, add_generation_prompt=True
+        )
         prompt_tokens = self.tokenizer(prompt_text, return_tensors="pt", add_special_tokens=False).input_ids
         response_start_idx = prompt_tokens.shape[1]
 
@@ -63,16 +86,67 @@ class DASFilteringPipeline:
             valid_mask = shift_labels != -100
             valid_logprobs = token_logprobs[valid_mask].cpu().numpy()
 
-        # Moyenne géométrique des probabilités (comme dans DAS)
-        # exp(mean(logprob))
         mean_prob = np.exp(np.mean(valid_logprobs)) if len(valid_logprobs) > 0 else 0.0
-        
+
         return {
             "mean_prob": float(mean_prob),
             "num_tokens": int(len(valid_logprobs))
         }
 
-    def process_dataset(self, input_path, output_dir, threshold=0.1, max_entries=None):
+    # -----------------------
+    # DAS phrase-level
+    # -----------------------
+    def compute_das_for_response(self, response_content: str, teacher_confidence: float):
+        """
+        Calcule la divergence phrase par phrase et la densité de Teacher Sentences.
+        """
+        sentences = self.split_into_sentences(response_content)
+        das_sentences = []
+
+        for sent in sentences:
+            stats = self.get_student_stats("", sent)
+            p_student = stats["mean_prob"]
+            p_teacher = teacher_confidence / 100.0
+            divergence = p_teacher - p_student
+
+            if divergence > 0.05:
+                label = "Teacher"
+            elif abs(divergence) <= 0.05:
+                label = "Shared"
+            else:
+                label = "Student"
+
+            das_sentences.append({
+                "sentence": sent,
+                "p_teacher": p_teacher,
+                "p_student": p_student,
+                "divergence": divergence,
+                "label": label
+            })
+
+        num_teacher = sum(1 for s in das_sentences if s["label"] == "Teacher")
+        density = num_teacher / max(1, len(das_sentences))
+
+        return das_sentences, density
+
+    @staticmethod
+    def keep_response(density, min_density=0.3):
+        return density >= min_density
+
+    @staticmethod
+    def format_sharegpt(instruction, response, system_prompt):
+        return {
+            "conversations": [
+                {"from": "human", "value": instruction},
+                {"from": "gpt", "value": response}
+            ],
+            "system": system_prompt
+        }
+
+    # -----------------------
+    # Pipeline principal
+    # -----------------------
+    def process_dataset(self, input_path, output_dir, stage1_density=0.1, stage2_density=0.3, max_entries=None):
         if not os.path.exists(input_path):
             print(f"Erreur : Le fichier {input_path} n'existe pas.")
             return
@@ -82,6 +156,8 @@ class DASFilteringPipeline:
 
         stage1_data = []
         stage2_data = []
+        stage1_densities = []
+        stage2_densities = []
 
         if max_entries is not None:
             dataset = dataset[:max_entries]
@@ -90,50 +166,42 @@ class DASFilteringPipeline:
             instruction = entry.get("input", "")
             system_prompt = entry.get("system_prompt", "")
 
-            # Traitement Stage 1 (Basse température)
+            # ---------------- Stage 1 ----------------
             if "stage1_response" in entry:
                 s1 = entry["stage1_response"]
-                p_teacher = s1.get("confidence", 0.0) / 100.0
                 resp_content = s1.get("content", "")
-                
+                teacher_conf = s1.get("confidence", 0.0)
+
                 try:
-                    stats = self.get_student_stats(instruction, resp_content)
-                    p_student = stats["mean_prob"]
-                    divergence = p_teacher - p_student
-                    
-                    # Logique DAS : On garde si la divergence est positive (Teacher >> Student)
-                    # ou si on veut simplement tout le stage 1 pour la base.
-                    # Ici on applique un filtrage léger pour le stage 1
-                    if divergence > -0.05: # On tolère que le student soit un peu meilleur
+                    _, density = self.compute_das_for_response(resp_content, teacher_conf)
+                    stage1_densities.append(density)
+                    if self.keep_response(density, min_density=stage1_density):
                         stage1_data.append(self.format_sharegpt(instruction, resp_content, system_prompt))
                 except Exception as e:
                     print(f"Erreur Stage 1 : {e}")
 
-            # Traitement Stage 2 (Haute température)
+            # ---------------- Stage 2 ----------------
             if "stage2_response" in entry:
                 s2 = entry["stage2_response"]
-                p_teacher = s2.get("confidence", 0.0) / 100.0
                 resp_content = s2.get("content", "")
+                teacher_conf = s2.get("confidence", 0.0)
 
                 try:
-                    stats = self.get_student_stats(instruction, resp_content)
-                    p_student = stats["mean_prob"]
-                    divergence = p_teacher - p_student
-
-                    # DAS strict pour Stage 2 (Haute diversité)
-                    if divergence > threshold:
+                    _, density = self.compute_das_for_response(resp_content, teacher_conf)
+                    stage2_densities.append(density)
+                    if self.keep_response(density, min_density=stage2_density):
                         stage2_data.append(self.format_sharegpt(instruction, resp_content, system_prompt))
                 except Exception as e:
                     print(f"Erreur Stage 2 : {e}")
 
-        # Sauvegarde
+        # ---------------- Sauvegarde ----------------
         os.makedirs(output_dir, exist_ok=True)
         s1_path = os.path.join(output_dir, "train_stage1_filtered.json")
         s2_path = os.path.join(output_dir, "train_stage2_filtered.json")
 
         with open(s1_path, 'w', encoding='utf-8') as f:
             json.dump(stage1_data, f, ensure_ascii=False, indent=2)
-        
+
         with open(s2_path, 'w', encoding='utf-8') as f:
             json.dump(stage2_data, f, ensure_ascii=False, indent=2)
 
@@ -141,24 +209,28 @@ class DASFilteringPipeline:
         print(f"Stage 1: {len(stage1_data)} exemples retenus.")
         print(f"Stage 2: {len(stage2_data)} exemples retenus.")
 
-    def format_sharegpt(self, instruction, response, system_prompt):
-        return {
-            "conversations": [
-                {"from": "human", "value": instruction},
-                {"from": "gpt", "value": response}
-            ],
-            "system": system_prompt
-        }
+        # ---------------- Histogramme DAS ----------------
+        plt.figure(figsize=(10, 6))
+        plt.hist(stage1_densities, bins=20, alpha=0.6, label="Stage 1")
+        plt.hist(stage2_densities, bins=20, alpha=0.6, label="Stage 2")
+        plt.xlabel("Densité de Teacher Sentences")
+        plt.ylabel("Nombre de réponses")
+        plt.title("Distribution DAS par Stage")
+        plt.legend()
 
+        # --- sauvegarde ---
+        plt.savefig(os.path.join(output_dir, "histogram_das.png"), dpi=300)
+        # --- affichage ---
+        plt.show()
+
+
+# -----------------------
+# MAIN EXECUTION
+# -----------------------
 if __name__ == "__main__":
-    # Paramètres
     DATASET_PATH = "synthetic_dataset.json"
     OUTPUT_DIR = "."
     STUDENT_MODEL = "unsloth/Qwen3-4B-Instruct-2507-unsloth-bnb-4bit"
-    
-    # Seuil de divergence (P_T - P_S)
-    # Plus il est élevé, plus on est sélectif sur les "Teacher Sentences"
-    THRESHOLD = 0.1 
 
     pipeline = DASFilteringPipeline(student_model_id=STUDENT_MODEL)
-    pipeline.process_dataset(DATASET_PATH, OUTPUT_DIR, threshold=THRESHOLD)
+    pipeline.process_dataset(DATASET_PATH, OUTPUT_DIR)

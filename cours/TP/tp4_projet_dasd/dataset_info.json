@@ -1,3 +1,10 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:9bbf439953a7456c03fdd077e37491873cd430e937da2160a1ebe232f4ab00bb
-size 101
+{
+    "train_stage1": {
+        "file_name": "train_stage1_filtered.json",
+        "formatting": "sharegpt"
+    },
+    "train_stage2": {
+        "file_name": "train_stage2_filtered.json",
+        "formatting": "sharegpt"
+    }
+}

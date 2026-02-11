@@ -1,37 +1,47 @@
-### Stage 2: SFT with high-temperature data (LoRA Continuation)
+### Stage 2: SFT High-Temperature (LoRA Continuation)
+
 model_name_or_path: unsloth/Qwen3-4B-Instruct-2507-unsloth-bnb-4bit
 adapter_name_or_path: saves/Qwen3-4B/lora/stage1
+
 stage: sft
 do_train: true
 finetuning_type: lora
+
 lora_target: all
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.05
+
 dataset: train_stage2
 dataset_dir: .
 template: qwen
 cutoff_len: 1024
-max_samples: 1000
 overwrite_cache: true
 preprocessing_num_workers: 8
 
 ### Output
 output_dir: saves/Qwen3-4B/lora/stage2
 logging_steps: 10
-save_steps: 100
+save_steps: 200
 plot_loss: true
 overwrite_output_dir: true
 
 ### Train
-per_device_train_batch_size: 4
-gradient_accumulation_steps: 4
-learning_rate: 5.0e-5
-num_train_epochs: 3.0
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 4.0e-5
+num_train_epochs: 2
 lr_scheduler_type: cosine
-warmup_ratio: 0.1
-fp16: true
+warmup_ratio: 0.05
+weight_decay: 0.01
+
+bf16: true
+fp16: false
+gradient_checkpointing: true
 ddp_timeout: 180000000
 
 ### Eval
 val_size: 0.1
 per_device_eval_batch_size: 1
-evaluation_strategy: steps
-eval_steps: 100
+eval_strategy: steps
+eval_steps: 200
