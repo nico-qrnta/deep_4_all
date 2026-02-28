@@ -1,0 +1,7 @@
+.env
+__pycache__/
+datasets/matchData.csv
+datasets/test_fix_v2.json
+datasets/synthetic_draft.json
+datasets/synthetic_dataset.json
+datasets/synthetic_dataset_backup.json
